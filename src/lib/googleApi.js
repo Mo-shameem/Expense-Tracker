@@ -1,18 +1,13 @@
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
 const API_KEY = import.meta.env.VITE_GOOGLE_API_KEY
-const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email'
+const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file'
 const SHEETS_BASE = 'https://sheets.googleapis.com/v4/spreadsheets'
 
-// ─── Token management ────────────────────────────────────────────────────────
+// ─── Token management ─────────────────────────────────────────────────────────
 
 let _tokenClient = null
 let _accessToken = null
 let _tokenExpiry = 0
-let _tokenRefreshCallback = null
-
-export function setTokenRefreshCallback(cb) {
-  _tokenRefreshCallback = cb
-}
 
 function isTokenValid() {
   return _accessToken && Date.now() < _tokenExpiry - 60_000
@@ -48,114 +43,76 @@ export function loadTokenFromSession() {
   return false
 }
 
-// ─── Redirect-based OAuth (works on all mobile browsers) ─────────────────────
-
-export function redirectToGoogleLogin() {
-  const params = new URLSearchParams({
-    client_id: CLIENT_ID,
-    redirect_uri: window.location.origin + '/',
-    response_type: 'token',
-    scope: SCOPES,
-    include_granted_scopes: 'true',
-    state: 'et_auth'
-  })
-  window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${params}`
+export function signOut() {
+  if (_accessToken) window.google?.accounts.oauth2.revoke(_accessToken, () => {})
+  clearAccessToken()
 }
 
-// Call this before React mounts (in main.jsx) to catch the OAuth redirect response
-export function consumeOAuthRedirect() {
-  const hash = window.location.hash
-  if (!hash || hash.startsWith('#/')) return false
-
-  const params = new URLSearchParams(hash.substring(1))
-  const token = params.get('access_token')
-  const expiresIn = params.get('expires_in')
-  const state = params.get('state')
-
-  if (token && state === 'et_auth') {
-    setAccessToken(token, parseInt(expiresIn) || 3600)
-    // Replace hash so React Router sees the root route
-    window.history.replaceState(null, '', window.location.pathname + '#/')
-    return true
-  }
-  return false
-}
-
-// ─── Google Identity Services (popup fallback for desktop) ───────────────────
+// ─── Google Identity Services ─────────────────────────────────────────────────
 
 export function loadGsiScript() {
   return new Promise((resolve, reject) => {
     if (window.google?.accounts) { resolve(); return }
+    const existing = document.querySelector('script[src*="accounts.google.com/gsi"]')
+    if (existing) { existing.addEventListener('load', resolve); return }
     const s = document.createElement('script')
     s.src = 'https://accounts.google.com/gsi/client'
+    s.async = true
+    s.defer = true
     s.onload = resolve
-    s.onerror = () => reject(new Error('Failed to load GSI script'))
+    s.onerror = () => reject(new Error('Failed to load Google Sign-In'))
     document.head.appendChild(s)
   })
 }
 
 export function initTokenClient() {
+  if (_tokenClient) return Promise.resolve(_tokenClient)
   return new Promise((resolve) => {
     _tokenClient = window.google.accounts.oauth2.initTokenClient({
       client_id: CLIENT_ID,
       scope: SCOPES,
-      callback: (resp) => {
-        if (resp.error) return
-        setAccessToken(resp.access_token, resp.expires_in)
-        if (_tokenRefreshCallback) _tokenRefreshCallback(resp.access_token)
-      }
+      callback: () => {} // set per-request in requestAccessToken
     })
     resolve(_tokenClient)
   })
 }
 
+// Must be called synchronously within a user gesture handler
 export function requestAccessToken() {
   return new Promise((resolve, reject) => {
-    if (!_tokenClient) { reject(new Error('Token client not initialized')); return }
-    const original = _tokenRefreshCallback
-    _tokenRefreshCallback = (token) => {
-      _tokenRefreshCallback = original
-      resolve(token)
+    if (!_tokenClient) { reject(new Error('Sign-in not ready, please try again')); return }
+    _tokenClient.callback = (resp) => {
+      if (resp.error) { reject(new Error(resp.error)); return }
+      setAccessToken(resp.access_token, resp.expires_in)
+      resolve(resp.access_token)
     }
     _tokenClient.requestAccessToken({ prompt: isTokenValid() ? '' : 'consent' })
   })
 }
 
-export function signOut() {
-  if (_accessToken) {
-    window.google?.accounts.oauth2.revoke(_accessToken)
-  }
-  clearAccessToken()
+// ─── Auto-refresh expired token silently ─────────────────────────────────────
+
+export async function ensureValidToken() {
+  if (isTokenValid()) return _accessToken
+  const token = await requestAccessToken()
+  return token
 }
 
-// ─── Authenticated fetch with auto-refresh ────────────────────────────────────
+// ─── Authenticated fetch ──────────────────────────────────────────────────────
 
 async function authFetch(url, options = {}) {
-  if (!isTokenValid()) {
-    await requestAccessToken()
-  }
-
+  if (!isTokenValid()) await ensureValidToken()
   const resp = await fetch(url, {
     ...options,
-    headers: {
-      ...options.headers,
-      Authorization: `Bearer ${_accessToken}`,
-      'Content-Type': 'application/json'
-    }
+    headers: { ...options.headers, Authorization: `Bearer ${_accessToken}`, 'Content-Type': 'application/json' }
   })
-
   if (resp.status === 401) {
     await requestAccessToken()
     return fetch(url, {
       ...options,
-      headers: {
-        ...options.headers,
-        Authorization: `Bearer ${_accessToken}`,
-        'Content-Type': 'application/json'
-      }
+      headers: { ...options.headers, Authorization: `Bearer ${_accessToken}`, 'Content-Type': 'application/json' }
     })
   }
-
   return resp
 }
 
@@ -168,7 +125,7 @@ async function sheetsRequest(path, options = {}) {
   return resp.json()
 }
 
-// ─── Spreadsheet helpers ──────────────────────────────────────────────────────
+// ─── Spreadsheet setup ────────────────────────────────────────────────────────
 
 const EXPENSE_HEADERS = ['Date', 'Amount', 'Category', 'Note', 'Timestamp']
 const CATEGORY_SHEET = 'Categories'
@@ -177,16 +134,10 @@ const DEFAULT_CATEGORIES = ['Fuel', 'Grocery', 'Food', 'Travel', 'Rent']
 export async function findOrCreateSpreadsheet(userEmail) {
   const stored = localStorage.getItem(`spreadsheetId_${userEmail}`)
   if (stored) {
-    // Verify still accessible
-    try {
-      await sheetsRequest(`/${stored}?fields=spreadsheetId`)
-      return stored
-    } catch {
-      localStorage.removeItem(`spreadsheetId_${userEmail}`)
-    }
+    try { await sheetsRequest(`/${stored}?fields=spreadsheetId`); return stored }
+    catch { localStorage.removeItem(`spreadsheetId_${userEmail}`) }
   }
 
-  // Search Drive for existing sheet
   const searchResp = await authFetch(
     `https://www.googleapis.com/drive/v3/files?q=name%3D'ExpenseTracker-${userEmail}'%20and%20mimeType%3D'application%2Fvnd.google-apps.spreadsheet'%20and%20trashed%3Dfalse&fields=files(id)`
   )
@@ -198,7 +149,6 @@ export async function findOrCreateSpreadsheet(userEmail) {
     }
   }
 
-  // Create new spreadsheet
   const created = await sheetsRequest('', {
     method: 'POST',
     body: JSON.stringify({
@@ -224,13 +174,9 @@ export async function findOrCreateSpreadsheet(userEmail) {
 
 export async function fetchExpenses(spreadsheetId) {
   const data = await sheetsRequest(`/${spreadsheetId}/values/Expenses!A2:E`)
-  const rows = data.values || []
-  return rows.map((r) => ({
-    date: r[0] || '',
-    amount: parseFloat(r[1]) || 0,
-    category: r[2] || '',
-    note: r[3] || '',
-    timestamp: r[4] || ''
+  return (data.values || []).map(r => ({
+    date: r[0] || '', amount: parseFloat(r[1]) || 0,
+    category: r[2] || '', note: r[3] || '', timestamp: r[4] || ''
   })).filter(e => e.date)
 }
 
@@ -243,16 +189,11 @@ export async function appendExpense(spreadsheetId, { date, amount, category, not
 }
 
 export async function deleteExpense(spreadsheetId, rowIndex) {
-  // rowIndex is 0-based in data; row 0 = header, so data row 0 = sheet row 1 (0-indexed) = delete row 1+1=2
-  const sheetRowIndex = rowIndex + 1 // 0-indexed sheet row (header is 0)
+  const sheetRowIndex = rowIndex + 1
   await sheetsRequest(`/${spreadsheetId}:batchUpdate`, {
     method: 'POST',
     body: JSON.stringify({
-      requests: [{
-        deleteDimension: {
-          range: { sheetId: 0, dimension: 'ROWS', startIndex: sheetRowIndex, endIndex: sheetRowIndex + 1 }
-        }
-      }]
+      requests: [{ deleteDimension: { range: { sheetId: 0, dimension: 'ROWS', startIndex: sheetRowIndex, endIndex: sheetRowIndex + 1 } } }]
     })
   })
 }
@@ -286,26 +227,18 @@ export function queueOfflineExpense(spreadsheetId, expense) {
 }
 
 export function getOfflineQueue() {
-  try {
-    return JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]')
-  } catch {
-    return []
-  }
+  try { return JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]') }
+  catch { return [] }
 }
 
 export async function flushOfflineQueue() {
   const queue = getOfflineQueue()
   if (!queue.length) return 0
-
   const failed = []
   for (const item of queue) {
-    try {
-      await appendExpense(item.spreadsheetId, item.expense)
-    } catch {
-      failed.push(item)
-    }
+    try { await appendExpense(item.spreadsheetId, item.expense) }
+    catch { failed.push(item) }
   }
-
   localStorage.setItem(QUEUE_KEY, JSON.stringify(failed))
   return queue.length - failed.length
 }

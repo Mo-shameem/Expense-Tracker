@@ -1,13 +1,7 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
-  loadGsiScript,
-  initTokenClient,
-  requestAccessToken,
-  redirectToGoogleLogin,
-  signOut,
-  loadTokenFromSession,
-  getAccessToken,
-  findOrCreateSpreadsheet
+  loadGsiScript, initTokenClient, requestAccessToken,
+  signOut, loadTokenFromSession, getAccessToken, findOrCreateSpreadsheet
 } from '../lib/googleApi'
 
 async function fetchUserInfo(token) {
@@ -15,16 +9,16 @@ async function fetchUserInfo(token) {
     headers: { Authorization: `Bearer ${token}` }
   })
   if (!resp.ok) throw new Error('Failed to fetch user info')
-  const info = await resp.json()
-  return { email: info.email, name: info.name, picture: info.picture }
+  return resp.json()
 }
 
 export function useAuth() {
-  const [user, setUser] = useState(null)
+  const [user, setUser]             = useState(null)
   const [spreadsheetId, setSpreadsheetId] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [signingIn, setSigningIn] = useState(false)
-  const [error, setError] = useState(null)
+  const [loading, setLoading]       = useState(true)
+  const [signingIn, setSigningIn]   = useState(false)
+  const [error, setError]           = useState(null)
+  const gsiReady = useRef(false)
 
   const setupSpreadsheet = useCallback(async (email) => {
     const id = await findOrCreateSpreadsheet(email)
@@ -32,77 +26,67 @@ export function useAuth() {
     return id
   }, [])
 
-  const finalizeLogin = useCallback(async (token) => {
-    const userInfo = await fetchUserInfo(token)
-    setUser(userInfo)
-    localStorage.setItem('expense_user', JSON.stringify(userInfo))
-    await setupSpreadsheet(userInfo.email)
-  }, [setupSpreadsheet])
+  // Pre-load GSI script silently on mount so it's ready when user taps login
+  useEffect(() => {
+    loadGsiScript()
+      .then(() => initTokenClient())
+      .then(() => { gsiReady.current = true })
+      .catch(() => {})
+  }, [])
 
+  // Restore session on mount
   useEffect(() => {
     let mounted = true
     ;(async () => {
       try {
-        // Case 1: returning from OAuth redirect — token already stored by main.jsx
-        const storedUser = localStorage.getItem('expense_user')
-        const tokenRestored = loadTokenFromSession()
-
-        if (tokenRestored) {
+        if (loadTokenFromSession()) {
           const token = getAccessToken()
-          if (storedUser) {
-            // Known user, valid token — restore session silently
-            const u = JSON.parse(storedUser)
+          const stored = localStorage.getItem('expense_user')
+          if (stored) {
+            const u = JSON.parse(stored)
             if (mounted) { setUser(u); await setupSpreadsheet(u.email) }
           } else {
-            // New login from redirect — fetch user info
-            if (mounted) await finalizeLogin(token)
-          }
-          return
-        }
-
-        // Case 2: stored user but expired token — try silent popup refresh (desktop only)
-        if (storedUser) {
-          try {
-            await loadGsiScript()
-            await initTokenClient()
-            const token = await requestAccessToken()
-            const u = JSON.parse(storedUser)
+            const info = await fetchUserInfo(token)
+            const u = { email: info.email, name: info.name, picture: info.picture }
+            localStorage.setItem('expense_user', JSON.stringify(u))
             if (mounted) { setUser(u); await setupSpreadsheet(u.email) }
-          } catch {
-            // Popup blocked (mobile) — clear user, require re-login
-            if (mounted) setUser(null)
           }
+        } else {
+          localStorage.removeItem('expense_user')
+          if (mounted) setUser(null)
         }
-      } catch (e) {
-        if (mounted) setError(e.message)
+      } catch {
+        if (mounted) setUser(null)
       } finally {
         if (mounted) setLoading(false)
       }
     })()
-
     return () => { mounted = false }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [setupSpreadsheet])
 
+  // Login — called directly from button tap, triggers popup synchronously
   const login = useCallback(async () => {
     setError(null)
     setSigningIn(true)
-
-    // Try popup first (works on desktop + Android Chrome)
     try {
-      await loadGsiScript()
-      await initTokenClient()
+      // Ensure GSI is ready (usually already loaded from useEffect)
+      if (!gsiReady.current) {
+        await loadGsiScript()
+        await initTokenClient()
+        gsiReady.current = true
+      }
+      // requestAccessToken opens the Google popup synchronously
       const token = await requestAccessToken()
-      await finalizeLogin(token)
+      const info = await fetchUserInfo(token)
+      const u = { email: info.email, name: info.name, picture: info.picture }
+      localStorage.setItem('expense_user', JSON.stringify(u))
+      setUser(u)
+      await setupSpreadsheet(u.email)
+    } catch (e) {
+      setError(e.message || 'Sign-in failed. Please allow popups and try again.')
       setSigningIn(false)
-      return
-    } catch {
-      // Popup blocked — fall through to redirect
     }
-
-    // Redirect flow (works everywhere, including iOS Safari)
-    redirectToGoogleLogin()
-    // Page will navigate away; signingIn stays true during redirect
-  }, [finalizeLogin])
+  }, [setupSpreadsheet])
 
   const logout = useCallback(() => {
     signOut()
