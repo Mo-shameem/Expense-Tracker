@@ -1,6 +1,6 @@
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
 const API_KEY = import.meta.env.VITE_GOOGLE_API_KEY
-const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file'
+const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email'
 const SHEETS_BASE = 'https://sheets.googleapis.com/v4/spreadsheets'
 
 // ─── Token management ────────────────────────────────────────────────────────
@@ -48,7 +48,40 @@ export function loadTokenFromSession() {
   return false
 }
 
-// ─── Google Identity Services ─────────────────────────────────────────────────
+// ─── Redirect-based OAuth (works on all mobile browsers) ─────────────────────
+
+export function redirectToGoogleLogin() {
+  const params = new URLSearchParams({
+    client_id: CLIENT_ID,
+    redirect_uri: window.location.origin + '/',
+    response_type: 'token',
+    scope: SCOPES,
+    include_granted_scopes: 'true',
+    state: 'et_auth'
+  })
+  window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${params}`
+}
+
+// Call this before React mounts (in main.jsx) to catch the OAuth redirect response
+export function consumeOAuthRedirect() {
+  const hash = window.location.hash
+  if (!hash || hash.startsWith('#/')) return false
+
+  const params = new URLSearchParams(hash.substring(1))
+  const token = params.get('access_token')
+  const expiresIn = params.get('expires_in')
+  const state = params.get('state')
+
+  if (token && state === 'et_auth') {
+    setAccessToken(token, parseInt(expiresIn) || 3600)
+    // Replace hash so React Router sees the root route
+    window.history.replaceState(null, '', window.location.pathname + '#/')
+    return true
+  }
+  return false
+}
+
+// ─── Google Identity Services (popup fallback for desktop) ───────────────────
 
 export function loadGsiScript() {
   return new Promise((resolve, reject) => {

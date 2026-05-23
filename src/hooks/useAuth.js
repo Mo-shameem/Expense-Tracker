@@ -3,26 +3,28 @@ import {
   loadGsiScript,
   initTokenClient,
   requestAccessToken,
+  redirectToGoogleLogin,
   signOut,
   loadTokenFromSession,
-  setTokenRefreshCallback,
+  getAccessToken,
   findOrCreateSpreadsheet
 } from '../lib/googleApi'
+
+async function fetchUserInfo(token) {
+  const resp = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+    headers: { Authorization: `Bearer ${token}` }
+  })
+  if (!resp.ok) throw new Error('Failed to fetch user info')
+  const info = await resp.json()
+  return { email: info.email, name: info.name, picture: info.picture }
+}
 
 export function useAuth() {
   const [user, setUser] = useState(null)
   const [spreadsheetId, setSpreadsheetId] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [signingIn, setSigningIn] = useState(false)
   const [error, setError] = useState(null)
-
-  const decodeJwt = (token) => {
-    try {
-      const payload = token.split('.')[1]
-      return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')))
-    } catch {
-      return null
-    }
-  }
 
   const setupSpreadsheet = useCallback(async (email) => {
     const id = await findOrCreateSpreadsheet(email)
@@ -30,59 +32,46 @@ export function useAuth() {
     return id
   }, [])
 
-  const handleCredential = useCallback(async (credentialResponse) => {
-    const payload = decodeJwt(credentialResponse.credential)
-    if (!payload) return
-    const userInfo = { email: payload.email, name: payload.name, picture: payload.picture }
+  const finalizeLogin = useCallback(async (token) => {
+    const userInfo = await fetchUserInfo(token)
     setUser(userInfo)
     localStorage.setItem('expense_user', JSON.stringify(userInfo))
-
-    try {
-      await requestAccessToken()
-      await setupSpreadsheet(userInfo.email)
-    } catch (e) {
-      setError(e.message)
-    }
+    await setupSpreadsheet(userInfo.email)
   }, [setupSpreadsheet])
 
   useEffect(() => {
     let mounted = true
     ;(async () => {
       try {
-        await loadGsiScript()
-        await initTokenClient()
-
-        setTokenRefreshCallback(async () => {
-          const stored = localStorage.getItem('expense_user')
-          if (stored && mounted) {
-            const u = JSON.parse(stored)
-            if (!spreadsheetId) await setupSpreadsheet(u.email)
-          }
-        })
-
-        // Try to restore session
+        // Case 1: returning from OAuth redirect — token already stored by main.jsx
         const storedUser = localStorage.getItem('expense_user')
-        if (storedUser && loadTokenFromSession()) {
-          const u = JSON.parse(storedUser)
-          if (mounted) {
-            setUser(u)
-            await setupSpreadsheet(u.email)
+        const tokenRestored = loadTokenFromSession()
+
+        if (tokenRestored) {
+          const token = getAccessToken()
+          if (storedUser) {
+            // Known user, valid token — restore session silently
+            const u = JSON.parse(storedUser)
+            if (mounted) { setUser(u); await setupSpreadsheet(u.email) }
+          } else {
+            // New login from redirect — fetch user info
+            if (mounted) await finalizeLogin(token)
           }
-        } else if (storedUser) {
-          // Token expired, need fresh token - init one-tap
-          const u = JSON.parse(storedUser)
-          window.google.accounts.id.initialize({
-            client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
-            callback: handleCredential,
-            auto_select: true
-          })
-          window.google.accounts.id.prompt((notification) => {
-            if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
-              // Will require manual sign-in
-              if (mounted) setUser(null)
-            }
-          })
-          if (mounted) setUser(u) // Optimistic
+          return
+        }
+
+        // Case 2: stored user but expired token — try silent popup refresh (desktop only)
+        if (storedUser) {
+          try {
+            await loadGsiScript()
+            await initTokenClient()
+            const token = await requestAccessToken()
+            const u = JSON.parse(storedUser)
+            if (mounted) { setUser(u); await setupSpreadsheet(u.email) }
+          } catch {
+            // Popup blocked (mobile) — clear user, require re-login
+            if (mounted) setUser(null)
+          }
         }
       } catch (e) {
         if (mounted) setError(e.message)
@@ -96,45 +85,31 @@ export function useAuth() {
 
   const login = useCallback(async () => {
     setError(null)
+    setSigningIn(true)
+
+    // Try popup first (works on desktop + Android Chrome)
     try {
       await loadGsiScript()
-
-      window.google.accounts.id.initialize({
-        client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
-        callback: handleCredential
-      })
-
-      await requestAccessToken()
-
-      // After we get the access token, fetch user info
-      const resp = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-        headers: { Authorization: `Bearer ${window.__gsi_token || ''}` }
-      })
-
-      // Fallback: use one-tap prompt to get user info via ID token
-      window.google.accounts.id.prompt()
-    } catch (e) {
-      setError(e.message)
+      await initTokenClient()
+      const token = await requestAccessToken()
+      await finalizeLogin(token)
+      setSigningIn(false)
+      return
+    } catch {
+      // Popup blocked — fall through to redirect
     }
-  }, [handleCredential])
 
-  const loginWithOneTap = useCallback(() => {
-    setError(null)
-    window.google.accounts.id.initialize({
-      client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
-      callback: handleCredential,
-      context: 'signin'
-    })
-    window.google.accounts.id.prompt()
-  }, [handleCredential])
+    // Redirect flow (works everywhere, including iOS Safari)
+    redirectToGoogleLogin()
+    // Page will navigate away; signingIn stays true during redirect
+  }, [finalizeLogin])
 
   const logout = useCallback(() => {
     signOut()
     setUser(null)
     setSpreadsheetId(null)
     localStorage.removeItem('expense_user')
-    window.google?.accounts.id.disableAutoSelect()
   }, [])
 
-  return { user, spreadsheetId, loading, error, login: loginWithOneTap, logout }
+  return { user, spreadsheetId, loading, signingIn, error, login, logout }
 }

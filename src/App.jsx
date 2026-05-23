@@ -11,7 +11,7 @@ import { Skeleton } from './components/Skeleton'
 const ChartsPage = lazy(() => import('./pages/ChartsPage'))
 
 export default function App() {
-  const { user, spreadsheetId, loading: authLoading, error: authError, login, logout } = useAuth()
+  const { user, spreadsheetId, loading: authLoading, signingIn, error: authError, login, logout } = useAuth()
   const {
     expenses, categories, loading, syncing, error, pendingCount,
     refresh, addExpense, removeExpense, addCategory, clearError
@@ -50,7 +50,7 @@ export default function App() {
     <HashRouter>
       {toast && <Toast message={toast.msg} type={toast.type} onClose={() => setToast(null)} />}
       {!user ? (
-        <LoginPage onLogin={login} />
+        <LoginPage onLogin={login} signingIn={signingIn} />
       ) : (
         <Layout user={user} onLogout={logout} pendingCount={pendingCount}>
           <Routes>
