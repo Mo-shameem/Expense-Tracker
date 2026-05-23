@@ -78,15 +78,23 @@ export function initTokenClient() {
 }
 
 // Must be called synchronously within a user gesture handler
-export function requestAccessToken() {
+// forceConsent=true always shows the consent screen (use on explicit login)
+export function requestAccessToken(forceConsent = false) {
   return new Promise((resolve, reject) => {
     if (!_tokenClient) { reject(new Error('Sign-in not ready, please try again')); return }
     _tokenClient.callback = (resp) => {
-      if (resp.error) { reject(new Error(resp.error)); return }
+      if (resp.error) {
+        if (resp.error === 'access_denied') {
+          reject(new Error('Access denied. If this account is new, ask the app owner to add it as a test user in Google Cloud Console.'))
+        } else {
+          reject(new Error(resp.error))
+        }
+        return
+      }
       setAccessToken(resp.access_token, resp.expires_in)
       resolve(resp.access_token)
     }
-    _tokenClient.requestAccessToken({ prompt: isTokenValid() ? '' : 'consent' })
+    _tokenClient.requestAccessToken({ prompt: forceConsent || !isTokenValid() ? 'consent' : '' })
   })
 }
 

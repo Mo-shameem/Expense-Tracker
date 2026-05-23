@@ -75,8 +75,8 @@ export function useAuth() {
         await initTokenClient()
         gsiReady.current = true
       }
-      // requestAccessToken opens the Google popup synchronously
-      const token = await requestAccessToken()
+      // requestAccessToken opens the Google popup synchronously; force consent so all scopes are granted
+      const token = await requestAccessToken(true)
       const info = await fetchUserInfo(token)
       const u = { email: info.email, name: info.name, picture: info.picture }
       localStorage.setItem('expense_user', JSON.stringify(u))
