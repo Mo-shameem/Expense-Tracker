@@ -1,6 +1,6 @@
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
 const API_KEY = import.meta.env.VITE_GOOGLE_API_KEY
-const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file'
+const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file profile email'
 const SHEETS_BASE = 'https://sheets.googleapis.com/v4/spreadsheets'
 
 // ─── Token management ─────────────────────────────────────────────────────────
